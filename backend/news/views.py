@@ -1,5 +1,4 @@
 from rest_framework import generics, status
-from rest_framework.filters import SearchFilter
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.contrib.auth import authenticate, login as dj_login, logout as dj_logout
@@ -10,11 +9,18 @@ from .serializers import ArticleSerializer, UserDetailsSerializer
 
 class ArticleListAPIView(generics.ListAPIView):
 	serializer_class = ArticleSerializer
-	filter_backends = [SearchFilter]
-	search_fields = ['title', 'content', 'tags']
 
 	def get_queryset(self):
-		return Article.objects.all().order_by('-published_date')
+		queryset = Article.objects.all().order_by('-published_date')
+		search = self.request.query_params.get('search', None)
+		if search:
+			from django.db.models import Q
+			queryset = queryset.filter(
+				Q(title__icontains=search) |
+				Q(content__icontains=search) |
+				Q(tags__icontains=search)
+			)
+		return queryset
 
 class ArticleDetailAPIView(generics.RetrieveAPIView):
 	queryset = Article.objects.all()
@@ -89,6 +95,7 @@ class SignupAPIView(APIView):
             }
         }, status=status.HTTP_201_CREATED)
 
+
 class ProfileAPIView(APIView):
     def get(self, request, username):
         try:
@@ -96,7 +103,6 @@ class ProfileAPIView(APIView):
             details = UserDetails.objects.get(user=user)
             data = UserDetailsSerializer(details).data
             data['username'] = user.username
-            # Fix: return absolute image URL for frontend
             img_url = None
             if details.profile_img:
                 request_scheme = request.scheme
@@ -104,5 +110,45 @@ class ProfileAPIView(APIView):
                 img_url = f"{request_scheme}://{request_host}{details.profile_img.url}" if details.profile_img.url else None
             data['profile_img'] = img_url
             return Response(data, status=status.HTTP_200_OK)
+        except (User.DoesNotExist, UserDetails.DoesNotExist):
+            return Response({'error': 'Profile not found'}, status=status.HTTP_404_NOT_FOUND)
+
+
+# Dedicated view for editing profile
+from rest_framework.permissions import IsAuthenticated
+class EditProfileAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def put(self, request, username):
+        # Only allow user to edit their own profile
+        if not request.user.is_authenticated or request.user.username != username:
+            return Response({'error': 'Permission denied.'}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            user = User.objects.get(username=username)
+            details = UserDetails.objects.get(user=user)
+            data = request.data
+            new_username = data.get('username', user.username)
+            language = data.get('language', details.language)
+            country = data.get('country', details.country)
+            categories = data.get('categories', details.categories)
+            # Update username if changed and not taken
+            if new_username != user.username:
+                if User.objects.filter(username=new_username).exclude(pk=user.pk).exists():
+                    return Response({'error': 'Username already exists.'}, status=status.HTTP_400_BAD_REQUEST)
+                user.username = new_username
+                user.save()
+            details.language = language
+            details.country = country
+            details.categories = categories
+            details.save()
+            updated = UserDetailsSerializer(details).data
+            updated['username'] = user.username
+            img_url = None
+            if details.profile_img:
+                request_scheme = request.scheme
+                request_host = request.get_host()
+                img_url = f"{request_scheme}://{request_host}{details.profile_img.url}" if details.profile_img.url else None
+            updated['profile_img'] = img_url
+            return Response(updated, status=status.HTTP_200_OK)
         except (User.DoesNotExist, UserDetails.DoesNotExist):
             return Response({'error': 'Profile not found'}, status=status.HTTP_404_NOT_FOUND)
